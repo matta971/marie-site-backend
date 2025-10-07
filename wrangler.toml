@@ -1,0 +1,11 @@
+# wrangler.toml
+name = "marie-api-worker"
+main = "server.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+# Ces variables seront publiques, utilisez secrets pour les clés sensibles
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "votre_kv_namespace_id" # Optionnel pour le cache
