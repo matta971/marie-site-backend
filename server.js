@@ -352,6 +352,66 @@ app.get('/api/services', async (req, res) => {
   }
 });
 
+async function getRepertoire(env) {
+  const response = await fetch(`https://api.notion.com/v1/databases/${env.NOTION_REPERTOIRE_DB_ID}/query`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.NOTION_API_KEY}`,
+      'Notion-Version': '2022-06-28',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      sorts: [
+        {
+          property: 'Année(s)',
+          direction: 'descending',
+        },
+        {
+          property: 'Œuvre',
+          direction: 'ascending',
+        },
+      ],
+    }),
+  });
+
+  const data = await response.json();
+  
+  return data.results.map((page) => ({
+    id: page.id,
+    work: page.properties['Œuvre']?.title[0]?.plain_text || '',
+    composer: page.properties.Compositeur?.rich_text[0]?.plain_text || '',
+    role: page.properties['Rôle']?.rich_text[0]?.plain_text || '',
+    type: (page.properties.Type?.select?.name || '').toLowerCase(),
+    year: page.properties['Année(s)']?.rich_text[0]?.plain_text || '',
+    venue: page.properties['Lieu(x)']?.rich_text[0]?.plain_text || '',
+    language: page.properties.Langue?.select?.name || '',
+  }));
+}
+
+async function getBiography(env) {
+  // Récupérer les blocks de la page
+  const response = await fetch(`https://api.notion.com/v1/blocks/${env.NOTION_BIOGRAPHY_PAGE_ID}/children`, {
+    headers: {
+      'Authorization': `Bearer ${env.NOTION_API_KEY}`,
+      'Notion-Version': '2022-06-28',
+    },
+  });
+
+  const data = await response.json();
+  return { blocks: data.results };
+}
+
+// Dans le router, ajouter :
+if (url.pathname === '/api/biography') {
+  const data = await getBiography(env);
+  return new Response(JSON.stringify(data), {
+    headers: {
+      ...corsHeaders,
+      'Content-Type': 'application/json',
+    },
+  });
+}
+
 // Démarrer le serveur
 app.listen(PORT, async () => {
   console.log(`✅ Serveur backend démarré sur http://localhost:${PORT}`);
