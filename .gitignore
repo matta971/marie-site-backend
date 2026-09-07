@@ -27,3 +27,9 @@ dist-ssr
 *.tsbuildinfo
 node_modules/.tmp/
 package-lock.json
+
+# Variables d'environnement — ne jamais committer
+.env
+.env.*
+!.env.example
+.dev.vars
