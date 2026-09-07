@@ -807,6 +807,66 @@ async function getTestimonials(env) {
 
 // ==================== TRADUCTION AVEC CACHE KV ====================
 
+
+// Noms propres à ne jamais traduire. Un moteur automatique les prend pour des
+// mots communs : « Basse-Terre » devient « underground », « Opéra-Théâtre de
+// Metz » perd son opéra, « Guadeloupe » a déjà été rendu par « Guadalajara ».
+// Ils sont remplacés par des jetons le temps de la traduction, puis restaurés.
+// Les entrées les plus longues passent en premier, pour que « Opéra-Théâtre de
+// l'Eurométropole de Metz » soit protégé avant « Metz ».
+const NOMS_PROPRES = [
+  // Lieux
+  'Pointe-à-Pitre', 'Basse-Terre', 'Le Moule', 'Guadeloupe',
+  'Creutzwald', 'Saint-Avold', 'Queuleu', 'Talange', 'Vignot', 'Commercy',
+  'Metz', 'Massy', 'Reims', 'Nancy', 'Lille', 'Rouen',
+  // Salles et institutions
+  "Opéra-Théâtre de l'Eurométropole de Metz", 'Opéra-Théâtre de Metz Métropole',
+  'Opéra-Théâtre de Metz', 'Opéra de Massy', 'Opéra de Reims', 'Opéra de Metz',
+  'Arsenal Jean-Marie Rausch', 'Saint-Pierre-aux-Nonnains',
+  'Basilique Notre-Dame de Bon Secours', 'Basilique Saint-Vincent',
+  'Cathédrale Saint-Étienne', 'Église Sainte-Croix', 'Église du Mont Carmel',
+  'Saint-Pierre-et-Saint-Paul', 'Saint-Jean-Baptiste', 'Immaculée-Conception',
+  'Conservatoire de Talange', 'CASODOM', 'BellissiMetz',
+  // Œuvres
+  'La Vie parisienne', "Les Contes d'Hoffmann", 'Il Trittico', 'Suor Angelica',
+  'La Gioconda', 'My Fair Lady', "L'Élixir d'amour", 'Messa di Gloria',
+  'Petite Messe Solennelle', 'Stabat Mater', 'Un ballo in maschera',
+  'Le Trouvère', 'Dogora', 'Titanic', 'Carmen', 'Tosca', 'Norma', 'Elektra',
+  'Aida', 'Gianni Schicchi', 'MisaTango', 'Les Béatitudes',
+  // Rôles
+  'Madame de Quimper-Karadec', 'Madame Cardoza', 'La Badessa', 'La Cieca',
+  'Voix de la Mère', 'Ulrica', 'Azucena', 'Mercedes', 'Nicklausse',
+  // Personnes
+  'Marie-Émeraude Alcime', 'Nicky Mariette', 'Pierre Adolphe', 'Cécile Dumas',
+  'Aline Maalouf', 'Augustin Dikongué', 'Stella Souppaya', 'Simon Gamerre',
+  'Stéphane Garaffi', 'Ornella Bourelly', 'Philippe Kahn', 'Marcello Bedoni',
+  'Jérôme Savary', 'Paul-Émile Fourny', 'Claude Schnitzler',
+  'José Miguel Pérez-Sierra', 'Aurélien Azan Zielinski', 'Étienne Perruchon',
+].sort((a, b) => b.length - a.length);
+
+function protegerNomsPropres(texte) {
+  const gardes = [];
+  let resultat = texte;
+  for (const nom of NOMS_PROPRES) {
+    if (!resultat.includes(nom)) continue;
+    // Un jeton purement alphanumérique, que les moteurs laissent intact.
+    const jeton = `ZQX${gardes.length}QZX`;
+    resultat = resultat.split(nom).join(jeton);
+    gardes.push({ jeton, nom });
+  }
+  return { texte: resultat, gardes };
+}
+
+function restaurerNomsPropres(texte, gardes) {
+  let resultat = texte;
+  for (const { jeton, nom } of gardes) {
+    // Le moteur peut modifier la casse ou insérer des espaces dans le jeton.
+    const motif = new RegExp(jeton.split('').join('\s*'), 'gi');
+    resultat = resultat.replace(motif, nom);
+  }
+  return resultat;
+}
+
 // m2m100 attend le nom de la langue en toutes lettres, pas un code ISO.
 const NOMS_LANGUES = {
   en: 'english',
@@ -858,7 +918,8 @@ async function translateWithCache(text, targetLang, env) {
 
   let echec = null;
 
-  for (const chunk of chunks) {
+  for (const chunkBrut of chunks) {
+    const { texte: chunk, gardes } = protegerNomsPropres(chunkBrut);
     let traduit = null;
 
     if (env.AI) {
@@ -893,7 +954,7 @@ async function translateWithCache(text, targetLang, env) {
       }
     }
 
-    translatedChunks.push(traduit ?? chunk);
+    translatedChunks.push(traduit === null ? chunkBrut : restaurerNomsPropres(traduit, gardes));
   }
 
   const translated = translatedChunks.join(' ');
