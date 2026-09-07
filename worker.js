@@ -46,10 +46,14 @@ export default {
         if (!text || !lang) {
           return jsonResponse({ error: 'text et lang requis' }, 400);
         }
-        if (lang === 'fr') {
+        // Le client peut envoyer une locale complète (« fr-FR », « en-US@posix ») :
+        // on ne garde que le code de langue, sinon le français n'est pas reconnu
+        // et chaque variante régionale crée sa propre entrée de cache.
+        const codeLangue = String(lang).split('-')[0].split('@')[0].toLowerCase();
+        if (codeLangue === 'fr') {
           return jsonResponse({ translated: text });
         }
-        const result = await translateWithCache(text, lang, env);
+        const result = await translateWithCache(text, codeLangue, env);
         return jsonResponse(result);
       }
 
@@ -803,6 +807,17 @@ async function getTestimonials(env) {
 
 // ==================== TRADUCTION AVEC CACHE KV ====================
 
+// m2m100 attend le nom de la langue en toutes lettres, pas un code ISO.
+const NOMS_LANGUES = {
+  en: 'english',
+  de: 'german',
+  it: 'italian',
+  es: 'spanish',
+  pt: 'portuguese',
+  ru: 'russian',
+  fr: 'french',
+};
+
 async function translateWithCache(text, targetLang, env) {
   const langMap = {
     en: 'en-GB',
@@ -834,28 +849,62 @@ async function translateWithCache(text, targetLang, env) {
   const chunks = splitIntoChunks(text, MAX_CHUNK);
   const translatedChunks = [];
 
+  // Deux moteurs. Workers AI en premier : il tourne dans le même compte
+  // Cloudflare, sans quota lié à l'adresse IP de sortie. MyMemory ne sert plus
+  // que de secours, car il compte ses quotas par IP et les Workers sortent par
+  // des adresses partagées dont le quota est saturé en permanence : il répond
+  // 429 ou 504 en continu depuis le worker, alors qu'il fonctionne ailleurs.
+  const attribution = env.MYMEMORY_EMAIL ? `&de=${encodeURIComponent(env.MYMEMORY_EMAIL)}` : '';
+
+  let echec = null;
+
   for (const chunk of chunks) {
-    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(chunk)}&langpair=fr-FR|${to}`;
-    try {
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.responseStatus === 200 && data.responseData?.translatedText) {
-          translatedChunks.push(data.responseData.translatedText);
-        } else {
-          translatedChunks.push(chunk);
-        }
-      } else {
-        translatedChunks.push(chunk);
+    let traduit = null;
+
+    if (env.AI) {
+      try {
+        const r = await env.AI.run('@cf/meta/m2m100-1.2b', {
+          text: chunk,
+          source_lang: 'french',
+          target_lang: NOMS_LANGUES[targetLang] ?? targetLang,
+        });
+        if (r?.translated_text) traduit = r.translated_text;
+      } catch (e) {
+        echec = `AI: ${e.message || e}`;
       }
-    } catch {
-      translatedChunks.push(chunk);
     }
+
+    if (traduit === null) {
+      const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(chunk)}&langpair=fr-FR|${to}${attribution}`;
+      try {
+        const res = await fetch(url);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.responseStatus === 200 && data.responseData?.translatedText) {
+            traduit = data.responseData.translatedText;
+          } else {
+            echec = String(data.responseDetails || data.responseStatus);
+          }
+        } else {
+          echec = `MyMemory HTTP ${res.status}`;
+        }
+      } catch (e) {
+        echec = e.message || 'fetch impossible';
+      }
+    }
+
+    translatedChunks.push(traduit ?? chunk);
   }
 
   const translated = translatedChunks.join(' ');
 
-  // Store in KV (TTL 30 days)
+  // Ne jamais mettre un échec en cache : le texte source y resterait 30 jours et
+  // une panne momentanée de MyMemory figerait le site en français.
+  if (echec) {
+    console.error('Traduction impossible:', targetLang, echec);
+    return { translated, cached: false, error: echec };
+  }
+
   await env.TRANSLATIONS.put(cacheKey, translated, { expirationTtl: 2592000 });
 
   return { translated, cached: false };

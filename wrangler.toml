@@ -9,3 +9,7 @@ id = "9ec708b6ccbc43ce9a5bad9f153b8430"
 
 [vars]
 # Ces variables seront publiques, utilisez secrets pour les clés sensibles
+
+# Traduction du contenu Notion (Workers AI)
+[ai]
+binding = "AI"
