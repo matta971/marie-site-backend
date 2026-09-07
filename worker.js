@@ -53,6 +53,46 @@ export default {
         return jsonResponse(result);
       }
 
+      // ==================== ROUTE CONTACT ====================
+      if (url.pathname === '/api/contact' && request.method === 'POST') {
+        const body = await request.json().catch(() => null);
+        if (!body) return jsonResponse({ error: 'Corps de requête invalide' }, 400);
+
+        // Pot de miel : rempli = robot. On répond 200 pour ne pas l'informer.
+        if (body.website) return jsonResponse({ ok: true });
+
+        const nom = (body.nom || '').trim();
+        const email = (body.email || '').trim();
+        const telephone = (body.telephone || '').trim();
+        const objet = (body.objet || '').trim();
+        const message = (body.message || '').trim();
+
+        if (!nom || !email || !objet || !message) {
+          return jsonResponse({ error: 'Nom, e-mail, objet et message sont requis.' }, 400);
+        }
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+          return jsonResponse({ error: 'Adresse e-mail invalide.' }, 400);
+        }
+        if (nom.length > 120 || objet.length > 200 || message.length > 5000 || telephone.length > 40) {
+          return jsonResponse({ error: 'Un des champs dépasse la longueur autorisée.' }, 400);
+        }
+
+        // Limitation : 5 envois par heure et par IP.
+        const ip = request.headers.get('CF-Connecting-IP') || 'inconnue';
+        if (env.TRANSLATIONS) {
+          const key = `ratelimit:contact:${ip}`;
+          const count = parseInt((await env.TRANSLATIONS.get(key)) || '0', 10);
+          if (count >= 5) {
+            return jsonResponse({ error: 'Trop de messages envoyés. Réessayez dans une heure.' }, 429);
+          }
+          await env.TRANSLATIONS.put(key, String(count + 1), { expirationTtl: 3600 });
+        }
+
+        return jsonResponse(...(await sendContactEmail(
+          { nom, email, telephone, objet, message }, env
+        )));
+      }
+
       // ==================== ROUTE CHAT ====================
       if (url.pathname === '/api/chat' && request.method === 'POST') {
         const authHeader = request.headers.get('Authorization');
@@ -851,4 +891,67 @@ async function getBiography(env) {
 
   const data = await response.json();
   return { blocks: data.results };
+}
+
+
+// ==================== ENVOI DU FORMULAIRE DE CONTACT ====================
+// Utilise l'API transactionnelle de Brevo (les Workers ne peuvent pas parler SMTP).
+// Secrets attendus :
+//   BREVO_API_KEY      clé API Brevo (PAS la clé SMTP, qui sert au « send as » de Gmail)
+//   CONTACT_TO_EMAIL   destinataire réel (la boîte de Marie)
+//   CONTACT_FROM_EMAIL expéditeur, doit être un domaine authentifié chez Brevo
+// Renvoie un tuple [corps, status] à étaler dans jsonResponse.
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+async function sendContactEmail(form, env) {
+  if (!env.BREVO_API_KEY || !env.CONTACT_TO_EMAIL || !env.CONTACT_FROM_EMAIL) {
+    return [{ error: "L'envoi de messages n'est pas encore configuré." }, 503];
+  }
+
+  const lignes = [
+    ['Nom', form.nom],
+    ['E-mail', form.email],
+    ['Téléphone', form.telephone || '—'],
+    ['Objet', form.objet],
+  ]
+    .map(([k, v]) => `<tr><td style="padding:4px 12px 4px 0;color:#666">${escapeHtml(k)}</td><td style="padding:4px 0"><strong>${escapeHtml(v)}</strong></td></tr>`)
+    .join('');
+
+  const html = `<div style="font-family:system-ui,sans-serif;font-size:15px;color:#111">
+<p style="color:#046D5D;font-weight:600;margin:0 0 16px">Nouveau message depuis le site</p>
+<table style="border-collapse:collapse;margin-bottom:16px">${lignes}</table>
+<div style="white-space:pre-wrap;border-left:3px solid #D4AF37;padding-left:14px">${escapeHtml(form.message)}</div>
+<p style="color:#888;font-size:13px;margin-top:24px">Répondre à ce message écrit directement à ${escapeHtml(form.email)}.</p>
+</div>`;
+
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'api-key': env.BREVO_API_KEY,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+    body: JSON.stringify({
+      sender: { name: 'Site Marie-Émeraude', email: env.CONTACT_FROM_EMAIL },
+      to: [{ email: env.CONTACT_TO_EMAIL }],
+      replyTo: { email: form.email, name: form.nom },
+      subject: `[Site] ${form.objet}`,
+      htmlContent: html,
+    }),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    console.error("Brevo a refusé l'envoi :", response.status, detail);
+    return [{ error: "Le message n'a pas pu être envoyé. Réessayez plus tard." }, 502];
+  }
+
+  return [{ ok: true }, 200];
 }
