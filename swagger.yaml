@@ -1,0 +1,622 @@
+openapi: 3.0.3
+info:
+  title: Marie Emeraude - API Backend
+  description: |
+    API backend pour le site vitrine de Marie-Émeraude Alcime, mezzo-soprano.
+
+    Le backend sert de proxy entre le frontend React et l'API Notion, qui stocke toutes les données dynamiques (concerts, médias, presse, répertoire, témoignages, biographie).
+
+    **Environnements :**
+    - **Production** : Cloudflare Worker (`worker.js`)
+    - **Développement** : Express.js (`server.js`) sur le port 3001
+  version: 1.0.0
+  contact:
+    name: Marie Emeraude
+    url: https://marie-site.pages.dev
+
+servers:
+  - url: https://backend-site-marie-emeraude.matta971.workers.dev/api
+    description: Production (Cloudflare Worker)
+  - url: http://localhost:3001/api
+    description: Développement local (Express)
+
+tags:
+  - name: Concerts
+    description: Gestion des concerts et événements
+  - name: Médias
+    description: Vidéos, audios et photos
+  - name: Presse
+    description: Critiques et articles de presse
+  - name: Répertoire
+    description: Œuvres et rôles interprétés
+  - name: Témoignages
+    description: Témoignages d'élèves, collègues et organisateurs
+  - name: Biographie
+    description: Contenu de la page biographie
+  - name: Services
+    description: Contenu de la page services (dev uniquement)
+  - name: Traduction
+    description: Traduction de texte via MyMemory API
+  - name: Chat Admin
+    description: Chatbot admin avec Claude (production uniquement)
+  - name: Système
+    description: Endpoints système
+
+paths:
+  /test:
+    get:
+      tags: [Système]
+      summary: Health check
+      description: Vérifie que le backend est fonctionnel. Disponible uniquement en développement (Express).
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Backend fonctionnel
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Backend fonctionnel
+                  timestamp:
+                    type: string
+                    format: date-time
+                    example: "2024-03-12T10:30:45.123Z"
+
+  /concerts:
+    get:
+      tags: [Concerts]
+      summary: Liste des concerts
+      description: |
+        Retourne tous les concerts avec `Afficher=true`, triés par date croissante.
+        Les concerts passés et à venir sont tous retournés.
+      operationId: listConcerts
+      responses:
+        "200":
+          description: Liste des concerts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Concert"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /medias:
+    get:
+      tags: [Médias]
+      summary: Liste des médias
+      description: Retourne tous les médias triés par ordre croissant (`Ordre ASC`).
+      operationId: listMedias
+      responses:
+        "200":
+          description: Liste des médias
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Media"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /press:
+    get:
+      tags: [Presse]
+      summary: Liste des critiques de presse
+      description: Retourne toutes les entrées presse avec `Afficher=true`, triées par date décroissante.
+      operationId: listPress
+      responses:
+        "200":
+          description: Liste des critiques de presse
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Press"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /repertoire:
+    get:
+      tags: [Répertoire]
+      summary: Liste du répertoire
+      description: Retourne le répertoire complet trié par année décroissante puis par nom d'œuvre.
+      operationId: listRepertoire
+      responses:
+        "200":
+          description: Liste du répertoire
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Repertoire"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /testimonials:
+    get:
+      tags: [Témoignages]
+      summary: Liste des témoignages
+      description: Retourne tous les témoignages avec `Afficher=true`, triés par date décroissante.
+      operationId: listTestimonials
+      responses:
+        "200":
+          description: Liste des témoignages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Testimonial"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /biography:
+    get:
+      tags: [Biographie]
+      summary: Contenu de la biographie
+      description: |
+        Retourne les blocs de contenu de la page biographie Notion.
+
+        **Note :** Le format de réponse diffère entre le Worker (blocs Notion bruts) et Express (HTML parsé).
+      operationId: getBiography
+      responses:
+        "200":
+          description: Contenu de la biographie
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/BiographyBlocks"
+                  - $ref: "#/components/schemas/BiographyHTML"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /services:
+    get:
+      tags: [Services]
+      summary: Contenu de la page services
+      description: |
+        Retourne le contenu HTML parsé de la page services Notion.
+
+        **Disponible uniquement en développement** (Express).
+      operationId: getServices
+      responses:
+        "200":
+          description: Contenu de la page services
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BiographyHTML"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /translate:
+    post:
+      tags: [Traduction]
+      summary: Traduire du texte
+      description: |
+        Traduit du texte français vers une autre langue via l'API MyMemory.
+
+        - Si `lang=fr`, retourne le texte original sans appel API.
+        - Le texte est découpé en segments de max 450 caractères.
+        - Les résultats sont mis en cache dans Cloudflare KV (TTL 30 jours).
+
+        **Langues supportées :** en, de, it, es, pt, ru
+      operationId: translateText
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TranslateRequest"
+      responses:
+        "200":
+          description: Texte traduit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TranslateResponse"
+        "400":
+          description: Paramètres manquants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Paramètres 'text' et 'lang' requis"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /chat:
+    post:
+      tags: [Chat Admin]
+      summary: Chatbot admin
+      description: |
+        Endpoint du chatbot admin qui utilise Claude Sonnet pour gérer les données Notion.
+
+        **Disponible uniquement en production** (Cloudflare Worker).
+
+        Le chatbot fonctionne en boucle agentique :
+        1. Le frontend envoie l'historique de conversation
+        2. Claude analyse et peut demander l'exécution d'un tool Notion
+        3. Le Worker exécute le tool sur Notion
+        4. Le résultat est renvoyé à Claude
+        5. Claude génère la réponse finale
+
+        **Tools disponibles :** list_entries, create_concert, create_press, create_media, create_repertoire, create_testimonial, update_concert, update_press, update_media, update_repertoire, update_testimonial, delete_entry
+      operationId: adminChat
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatRequest"
+      responses:
+        "200":
+          description: Réponse du chatbot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatResponse"
+        "401":
+          description: Non autorisé
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Non autorisé
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Token d'authentification admin (ADMIN_PASSWORD)
+
+  responses:
+    ServerError:
+      description: Erreur serveur
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: Erreur serveur
+              message:
+                type: string
+                example: "Détails de l'erreur"
+
+  schemas:
+    Concert:
+      type: object
+      properties:
+        id:
+          type: string
+          description: ID de la page Notion
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        title:
+          type: string
+          description: Titre du concert
+          example: "Requiem de Mozart"
+        date:
+          type: string
+          format: date
+          description: Date du concert
+          example: "2024-05-15"
+        location:
+          type: string
+          description: Nom du lieu
+          example: "Salle Pleyel"
+        ville:
+          type: string
+          description: Ville
+          example: "Paris"
+        role:
+          type: string
+          description: Rôle interprété
+          example: "Mezzo-soprano solo"
+        description:
+          type: string
+          description: Description du concert
+          example: "Concert avec l'Orchestre de Paris"
+        type:
+          type: string
+          enum: [concert, recital, opera, masterclass]
+          description: Type d'événement
+          example: concert
+        ticketLink:
+          type: string
+          format: uri
+          nullable: true
+          description: Lien de billetterie
+          example: "https://www.sallepleyel.com/billetterie"
+        display:
+          type: boolean
+          description: Affiché sur le site
+          example: true
+
+    Media:
+      type: object
+      properties:
+        id:
+          type: string
+          description: ID de la page Notion
+        title:
+          type: string
+          description: Titre du média
+          example: "Carmen - Habanera"
+        type:
+          type: string
+          enum: [video, audio, photo]
+          description: Type de média
+          example: video
+        url:
+          type: string
+          format: uri
+          description: URL du média (YouTube, SoundCloud, etc.)
+          example: "https://www.youtube.com/watch?v=abc123"
+        description:
+          type: string
+          description: Description du média
+          example: "Extrait de Carmen à l'Opéra de Lyon"
+        date:
+          type: string
+          format: date
+          nullable: true
+          description: Date d'enregistrement
+          example: "2024-01-20"
+        featured:
+          type: boolean
+          description: Mis en avant sur le site
+          example: true
+        order:
+          type: integer
+          description: Ordre d'affichage
+          example: 1
+        category:
+          type: string
+          nullable: true
+          description: Catégorie du média
+          example: "Opera"
+        location:
+          type: string
+          nullable: true
+          description: Lieu d'enregistrement
+          example: "Opéra de Lyon"
+
+    Press:
+      type: object
+      properties:
+        id:
+          type: string
+          description: ID de la page Notion
+        quote:
+          type: string
+          description: Citation de la critique
+          example: "Une voix d'une rare intensité"
+        source:
+          type: string
+          description: Source de la publication
+          example: "Le Monde"
+        author:
+          type: string
+          nullable: true
+          description: Auteur de la critique
+          example: "Jean Dupont"
+        date:
+          type: string
+          format: date
+          nullable: true
+          description: Date de publication
+          example: "2024-03-10"
+        articleLink:
+          type: string
+          format: uri
+          nullable: true
+          description: Lien vers l'article complet
+          example: "https://lemonde.fr/article/critique"
+        type:
+          type: string
+          enum: [critique, interview, mention]
+          description: Type de presse
+          example: critique
+        display:
+          type: boolean
+          description: Affiché sur le site
+          example: true
+
+    Repertoire:
+      type: object
+      properties:
+        id:
+          type: string
+          description: ID de la page Notion
+        work:
+          type: string
+          description: Nom de l'œuvre
+          example: "Carmen"
+        composer:
+          type: string
+          description: Compositeur
+          example: "Georges Bizet"
+        role:
+          type: string
+          description: Rôle interprété
+          example: "Carmen"
+        type:
+          type: string
+          enum: [opera, oratorio, melodie, sacred]
+          description: Type d'œuvre
+          example: opera
+        year:
+          type: string
+          description: "Année(s) d'interprétation"
+          example: "2023-2024"
+        venue:
+          type: string
+          description: "Lieu(x) d'interprétation"
+          example: "Opéra de Paris"
+        language:
+          type: string
+          description: Langue de l'œuvre
+          example: "Français"
+
+    Testimonial:
+      type: object
+      properties:
+        id:
+          type: string
+          description: ID de la page Notion
+        name:
+          type: string
+          description: Nom de la personne
+          example: "Sophie Martin"
+        text:
+          type: string
+          description: Contenu du témoignage
+          example: "Un enseignement remarquable qui m'a permis de progresser énormément."
+        function:
+          type: string
+          description: Fonction ou titre
+          example: "Élève de chant"
+        type:
+          type: string
+          enum: [student, colleague, organizer]
+          description: Type de témoignage
+          example: student
+        date:
+          type: string
+          format: date
+          nullable: true
+          description: Date du témoignage
+          example: "2024-02-15"
+        display:
+          type: boolean
+          description: Affiché sur le site
+          example: true
+        pages:
+          type: array
+          items:
+            type: string
+          description: Pages où afficher le témoignage
+          example: ["accueil", "enseignement"]
+
+    BiographyBlocks:
+      type: object
+      description: Format Worker (blocs Notion bruts)
+      properties:
+        blocks:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              type:
+                type: string
+                enum: [paragraph, heading_1, heading_2]
+              paragraph:
+                type: object
+                properties:
+                  rich_text:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type:
+                          type: string
+                        text:
+                          type: object
+                          properties:
+                            content:
+                              type: string
+
+    BiographyHTML:
+      type: object
+      description: Format Express (HTML parsé)
+      properties:
+        content:
+          type: string
+          description: Contenu HTML parsé depuis les blocs Notion
+          example: "<h1>Biographie</h1><p>Marie-Émeraude Alcime est une mezzo-soprano...</p>"
+
+    TranslateRequest:
+      type: object
+      required: [text, lang]
+      properties:
+        text:
+          type: string
+          description: Texte à traduire (depuis le français)
+          example: "Marie-Émeraude est une mezzo-soprano reconnue."
+        lang:
+          type: string
+          enum: [en, de, it, es, pt, ru, fr]
+          description: |
+            Langue cible. Si `fr`, retourne le texte original.
+
+            Mapping interne : en→en-GB, de→de-DE, it→it-IT, es→es-ES, pt→pt-BR, ru→ru-RU
+          example: en
+
+    TranslateResponse:
+      type: object
+      properties:
+        translated:
+          type: string
+          description: Texte traduit
+          example: "Marie-Émeraude is a renowned mezzo-soprano."
+        cached:
+          type: boolean
+          description: Indique si le résultat provient du cache KV
+          example: false
+
+    ChatRequest:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          description: Historique de conversation (format Claude API)
+          items:
+            type: object
+            required: [role, content]
+            properties:
+              role:
+                type: string
+                enum: [user, assistant]
+              content:
+                oneOf:
+                  - type: string
+                    description: Message texte simple
+                  - type: array
+                    description: Contenu structuré (tool_use, tool_result, etc.)
+                    items:
+                      type: object
+          example:
+            - role: user
+              content: "Liste les prochains concerts"
+
+    ChatResponse:
+      type: object
+      properties:
+        reply:
+          type: string
+          description: Réponse de Claude formatée en Markdown
+          example: "Voici les prochains concerts :\n\n| Date | Titre | Lieu |\n|------|-------|------|\n| 2024-05-15 | Requiem de Mozart | Salle Pleyel |"
