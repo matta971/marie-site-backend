@@ -829,6 +829,7 @@ const NOMS_PROPRES = [
   'Conservatoire de Talange', 'CASODOM', 'BellissiMetz',
   // Œuvres
   'La Vie parisienne', "Les Contes d'Hoffmann", 'Il Trittico', 'Suor Angelica',
+  'Oratorio de Noël',
   'La Gioconda', 'My Fair Lady', "L'Élixir d'amour", 'Messa di Gloria',
   'Petite Messe Solennelle', 'Stabat Mater', 'Un ballo in maschera',
   'Le Trouvère', 'Dogora', 'Titanic', 'Carmen', 'Tosca', 'Norma', 'Elektra',
@@ -844,25 +845,61 @@ const NOMS_PROPRES = [
   'José Miguel Pérez-Sierra', 'Aurélien Azan Zielinski', 'Étienne Perruchon',
 ].sort((a, b) => b.length - a.length);
 
+function echapperRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Un nom propre n'apparaît pas toujours tel qu'il figure dans la liste, et une
+ * simple comparaison littérale en laissait passer deux formes courantes :
+ *
+ *   - une autre casse — Notion écrit « La vie parisienne » et « Petite messe
+ *     solennelle », là où la liste porte la graphie canonique ;
+ *   - une balise au milieu du nom : la lettrine de la biographie découpe
+ *     « Marie-Émeraude Alcime » en « <strong>M</strong>arie-Émeraude Alcime ».
+ *
+ * Le motif tolère donc les deux. Les frontières emploient \p{L} plutôt que \b,
+ * qui ne connaît pas les accents, et elles sont indispensables une fois la
+ * casse ignorée : sans elles « Norma » mordrait dans « normalement ».
+ */
+function motifNomPropre(nom) {
+  const coeur = nom
+    .split('')
+    .map(c => {
+      // Notion mélange les deux apostrophes dans un même document, et c'est
+      // la courbe qui figure dans « Opéra-Théâtre de l’Eurométropole de Metz ».
+      if (/['’‘]/.test(c)) return "['’‘]";
+      // Un espace peut être insécable, notamment devant la ponctuation double.
+      if (/\s/.test(c)) return '\\s+';
+      return echapperRegex(c);
+    })
+    .join('(?:<[^>]*>)*');
+  return new RegExp(`(?<!\\p{L})${coeur}(?!\\p{L})`, 'giu');
+}
+
 function protegerNomsPropres(texte) {
   const gardes = [];
   let resultat = texte;
   for (const nom of NOMS_PROPRES) {
-    if (!resultat.includes(nom)) continue;
     // Un jeton purement alphanumérique, que les moteurs laissent intact.
-    const jeton = `ZQX${gardes.length}QZX`;
-    resultat = resultat.split(nom).join(jeton);
-    gardes.push({ jeton, nom });
+    resultat = resultat.replace(motifNomPropre(nom), trouve => {
+      const jeton = `ZQX${gardes.length}QZX`;
+      gardes.push({ jeton, original: trouve });
+      return jeton;
+    });
   }
   return { texte: resultat, gardes };
 }
 
 function restaurerNomsPropres(texte, gardes) {
   let resultat = texte;
-  for (const { jeton, nom } of gardes) {
+  for (const { jeton, original } of gardes) {
     // Le moteur peut modifier la casse ou insérer des espaces dans le jeton.
-    const motif = new RegExp(jeton.split('').join('\s*'), 'gi');
-    resultat = resultat.replace(motif, nom);
+    const motif = new RegExp(jeton.split('').join('\\s*'), 'gi');
+    // On réinsère le texte exact d'origine, ce qui préserve sa casse et les
+    // balises qui le traversaient. Un remplacement par fonction, pour qu'un
+    // « $ » dans le nom ne soit pas pris pour un motif de substitution.
+    resultat = resultat.replace(motif, () => original);
   }
   return resultat;
 }
@@ -896,7 +933,13 @@ async function translateWithCache(text, targetLang, env) {
     hash = ((hash << 5) - hash) + text.charCodeAt(i);
     hash |= 0;
   }
-  const cacheKey = `${targetLang}_${hash}`;
+  // Le préfixe de version invalide tout le cache d'un coup, sans suppression
+  // en masse : les anciennes clés ne sont plus lues et expirent d'elles-mêmes
+  // au terme de leurs 30 jours. À incrémenter dès que la protection des noms
+  // propres change, faute de quoi les entrées déjà écrites gardent leurs
+  // traductions fautives — « La vie parisienne » rendue par « Das Pariser
+  // Leben », « Oratorio de Noël » par « Oratorio di Natale ».
+  const cacheKey = `v3:${targetLang}_${hash}`;
 
   // Check KV cache
   const cached = await env.TRANSLATIONS.get(cacheKey);
