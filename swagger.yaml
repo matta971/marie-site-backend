@@ -12,7 +12,7 @@ info:
   version: 1.0.0
   contact:
     name: Marie Emeraude
-    url: https://marie-site.pages.dev
+    url: https://marie-emeraude.com
 
 servers:
   - url: https://backend-site-marie-emeraude.matta971.workers.dev/api
@@ -37,6 +37,8 @@ tags:
     description: Contenu de la page services (dev uniquement)
   - name: Traduction
     description: Traduction de texte via MyMemory API
+  - name: Contact
+    description: Formulaire de contact du site (production uniquement)
   - name: Chat Admin
     description: Chatbot admin avec Claude (production uniquement)
   - name: Système
@@ -202,11 +204,24 @@ paths:
       tags: [Traduction]
       summary: Traduire du texte
       description: |
-        Traduit du texte français vers une autre langue via l'API MyMemory.
+        Traduit du texte français vers une autre langue.
 
-        - Si `lang=fr`, retourne le texte original sans appel API.
-        - Le texte est découpé en segments de max 450 caractères.
+        Deux moteurs, essayés dans cet ordre :
+
+        1. **Workers AI** (`@cf/meta/m2m100-1.2b`), qui tourne dans le même compte
+           Cloudflare et n'a donc pas de quota lié à l'adresse IP de sortie.
+        2. **MyMemory**, en secours uniquement. Il compte ses quotas par IP et les
+           Workers sortent par des adresses partagées saturées en permanence : il
+           répond 429 ou 504 en continu depuis le worker, alors qu'il fonctionne
+           ailleurs.
+
+        - Si `lang=fr`, retourne le texte original sans appel externe.
+        - Le texte est découpé en segments de 450 caractères au maximum.
+        - Les noms propres sont protégés avant traduction puis restaurés après,
+          quelles que soient la casse, les balises et les apostrophes.
         - Les résultats sont mis en cache dans Cloudflare KV (TTL 30 jours).
+          Un échec n'est **jamais** mis en cache : la réponse porte alors un champ
+          `error` et `translated` contient le texte source non traduit.
 
         **Langues supportées :** en, de, it, es, pt, ru
       operationId: translateText
@@ -233,6 +248,61 @@ paths:
                   error:
                     type: string
                     example: "Paramètres 'text' et 'lang' requis"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /contact:
+    post:
+      tags: [Contact]
+      summary: Envoyer un message depuis le formulaire du site
+      description: |
+        Transmet par e-mail le contenu du formulaire de contact.
+
+        **Disponible uniquement en production** (Cloudflare Worker).
+
+        - Le champ `website` est un pot de miel : rempli, la requête est ignorée et
+          l'API répond `200` sans rien envoyer, afin de ne pas informer le robot.
+        - Limitation : 5 envois par heure et par adresse IP, comptés dans Cloudflare KV.
+      operationId: sendContactMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactRequest"
+      responses:
+        "200":
+          description: Message envoyé, ou requête ignorée si le pot de miel est rempli
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+        "400":
+          description: |
+            Corps de requête invalide, champ requis manquant, adresse e-mail mal
+            formée, ou champ dépassant la longueur autorisée.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Nom, e-mail, objet et message sont requis."
+        "429":
+          description: Plus de 5 envois dans l'heure pour cette adresse IP
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "Trop de messages envoyés. Réessayez dans une heure."
         "500":
           $ref: "#/components/responses/ServerError"
 
@@ -558,6 +628,42 @@ components:
           description: Contenu HTML parsé depuis les blocs Notion
           example: "<h1>Biographie</h1><p>Marie-Émeraude Alcime est une mezzo-soprano...</p>"
 
+    ContactRequest:
+      type: object
+      required: [nom, email, objet, message]
+      properties:
+        nom:
+          type: string
+          maxLength: 120
+          description: Nom de l'expéditeur
+          example: Camille Durand
+        email:
+          type: string
+          format: email
+          description: Adresse e-mail de l'expéditeur
+          example: camille.durand@example.com
+        telephone:
+          type: string
+          maxLength: 40
+          description: Numéro de téléphone (facultatif)
+          example: "+33 6 12 34 56 78"
+        objet:
+          type: string
+          maxLength: 200
+          description: Objet du message
+          example: Demande de récital
+        message:
+          type: string
+          maxLength: 5000
+          description: Corps du message
+          example: "Bonjour, nous organisons un festival en juin et souhaiterions vous y inviter."
+        website:
+          type: string
+          description: |
+            Pot de miel, doit rester vide. S'il est rempli, la requête est ignorée
+            silencieusement et l'API répond tout de même `200`.
+          example: ""
+
     TranslateRequest:
       type: object
       required: [text, lang]
@@ -586,6 +692,12 @@ components:
           type: boolean
           description: Indique si le résultat provient du cache KV
           example: false
+        error:
+          type: string
+          description: |
+            Présent uniquement si la traduction a échoué. `translated` contient
+            alors le texte source non traduit, et le résultat n'est pas mis en cache.
+          example: "MyMemory HTTP 429"
 
     ChatRequest:
       type: object
